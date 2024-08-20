@@ -1,5 +1,8 @@
-# fingerprint-based-attendance-system
+# Fingerprint-based-attendance-system
 Final year project
+
+# Summary
+Student attendance system to digitally take the attendance of students
 
 # Components
 - Arduino Mega 2560
