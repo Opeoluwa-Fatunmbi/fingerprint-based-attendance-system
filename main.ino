@@ -6,33 +6,25 @@
 #include <RtcDS1302.h>
 #include <ThreeWire.h>
 #include <Keypad.h>
+#include "UUID.h"
 
 // Define the pins for the TFT display and SD card
 #define TFT_CS     10
 #define TFT_RST    8
 #define TFT_DC     9
 #define TFT_BACKLIGHT 11
-#define SD_CS      53   // Chip select pin for the SD card
+#define SD_CS      53
 
 // Define the pins for the RTC module
-#define DS1302_SCLK_PIN 7  // CLK
-#define DS1302_IO_PIN   6  // DAT
-#define DS1302_CE_PIN   5  // RST
+#define DS1302_SCLK_PIN 7
+#define DS1302_IO_PIN   6
+#define DS1302_CE_PIN   5
 
-// Initialize the ST7789 TFT display
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-
-// Initialize the fingerprint sensor
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&Serial1);
-
-// Initialize the RTC module
 ThreeWire myWire(DS1302_IO_PIN, DS1302_CE_PIN, DS1302_SCLK_PIN); 
 RtcDS1302<ThreeWire> Rtc(myWire);
 
-// Variable to keep track of the fingerprint ID
-int fingerprintID = 1;
-
-// Define the keypad with your pin layout
 const byte ROWS = 4; // Four rows
 const byte COLS = 4; // Four columns
 char keys[ROWS][COLS] = {
@@ -41,56 +33,52 @@ char keys[ROWS][COLS] = {
   {'7', '8', '9', 'C'},
   {'*', '0', '#', 'D'}
 };
-
-// Your specified pin connections
-byte rowPins[ROWS] = {26, 27, 28, 29}; // Connect to the row pinouts of the keypad
-byte colPins[COLS] = {22, 23, 24, 25}; // Connect to the column pinouts of the keypad
-
+byte rowPins[ROWS] = {26, 27, 28, 29}; 
+byte colPins[COLS] = {22, 23, 24, 25}; 
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 String studentName = "";
 String matricNumber = "";
+const String MATRIC_PREFIX = "CPE/";
 
 void setup() {
-  // Initialize serial communication
   Serial.begin(9600);
   Serial1.begin(57600);
 
-  // Initialize the TFT display
   pinMode(TFT_BACKLIGHT, OUTPUT);
-  analogWrite(TFT_BACKLIGHT, 255); // Set to maximum brightness (255)
-  tft.init(135, 240);    // Initialize the display with 135x240 resolution
-  tft.setRotation(3);    // Adjust rotation to correct orientation
-  tft.fillScreen(ST77XX_BLACK);  // Clear the screen with black color
-  tft.setTextColor(ST77XX_WHITE); // Set text color to white
-  tft.setTextSize(2);   // Set text size
-
-  // Disable TFT display before initializing SD card
+  analogWrite(TFT_BACKLIGHT, 255);
+  tft.init(135, 240);
+  tft.setRotation(3);
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
   digitalWrite(TFT_CS, HIGH);
 
-  // Initialize the SD card
   if (!SD.begin(SD_CS)) {
     displayMessage("SD card init failed, stopping.");
-    while (1);  // Stop the program if the SD card isn't found
+    while (1);
   }
-
   displayMessage("SD card initialized");
 
-  // Re-enable TFT display after initializing SD card
   digitalWrite(TFT_CS, LOW);
 
-  // Initialize the fingerprint sensor
   if (finger.verifyPassword()) {
     displayMessage("Found fingerprint sensor!");
   } else {
     displayMessage("Did not find fingerprint sensor :(");
-    while (1); // Stop the program if the sensor is not found
+    while (1);
   }
 
-  // Initialize the RTC
   Rtc.Begin();
 
-  // Display the welcome message with time and date
+  if (!Rtc.IsDateTimeValid()) {
+    Rtc.SetDateTime(RtcDateTime(__DATE__, __TIME__)); 
+  }
+
+  if (!Rtc.GetIsRunning()) {
+    Rtc.SetIsRunning(true);
+  }
+
   displayWelcomeMessage();
 }
 
@@ -109,45 +97,121 @@ void loop() {
 }
 
 void registerStudent() {
-  studentName = enterText("Enter Name:");
-  matricNumber = enterText("Enter Matric No:");
+  matricNumber = MATRIC_PREFIX + enterMatricNumber("Enter matric number (e.g., XX/YYYY):");
 
   displayMessage("Place your finger on the sensor...");
   while (finger.getImage() != FINGERPRINT_OK);
-  finger.image2Tz();
-  finger.createModel();
-  finger.storeModel(fingerprintID);
-  saveStudentData(fingerprintID, studentName, matricNumber);
-  fingerprintID++;
+  finger.image2Tz(1);
+  displayMessage("Remove finger");
+
+  delay(2000);
+
+  while (finger.getImage() != FINGERPRINT_OK);
+  finger.image2Tz(2);
+
+  if (finger.createModel() == FINGERPRINT_OK) {
+    int id = generateUniqueID(); 
+    if (finger.storeModel(id) == FINGERPRINT_OK) {
+      displayMessage("Saved! Returning to home...");
+      String uuid = generateUUID();  
+      saveStudentData(id, uuid, matricNumber);  // Save the fingerprint ID, UUID, and matric number
+    } else {
+      displayMessage("Error storing fingerprint!");
+    }
+  } else {
+    displayMessage("Error creating model!");
+  }
+  
+  delay(2500);
+  displayWelcomeMessage();
+}
+
+int generateUniqueID() {
+  static int id = 1; 
+  return id++;
 }
 
 void markAttendance() {
-  displayMessage("Place your finger on the sensor...");
-  while (finger.getImage() != FINGERPRINT_OK);
-  finger.image2Tz();
-  if (finger.fingerSearch() == FINGERPRINT_OK) {
-    int id = finger.fingerID;
-    String name = getStudentNameById(id);
-    if (name != "") {
-      displayMessage("Welcome, " + name);
-      logAttendance(name);
-    } else {
-      displayMessage("ID not found");
+    int attempts = 4;
+    bool matched = false;
+
+    for (int i = 0; i < attempts; i++) {
+        displayMessage("Place your finger on the sensor...");
+
+        while (finger.getImage() != FINGERPRINT_OK);
+        finger.image2Tz();
+
+        if (finger.fingerSearch() == FINGERPRINT_OK) {
+            int id = finger.fingerID;
+            String matric = getStudentMatricById(id);
+
+            if (matric != "") {
+                if (checkIfAlreadyMarked(id)) {
+                    displayMessage("You have already marked attendance!");
+                } else {
+                    RtcDateTime now = Rtc.GetDateTime();
+                    String dateTime = String(now.Month()) + "/" + String(now.Day()) + "/" + String(now.Year()) + 
+                                      "  " + String(now.Hour()) + ":" + String(now.Minute());
+                    String message = "Attendance taken!\n" + matric + "\n\n" + dateTime;
+                    displayMessage(message);
+                    logAttendance(id, matric);
+                }
+                matched = true;
+                break;
+            } else {
+                displayMessage("No match found. Try again.");
+            }
+        } else {
+            displayMessage("No match found. Try again.");
+        }
     }
-  } else {
-    displayMessage("Fingerprint not matched");
-  }
+
+    if (!matched) {
+        displayMessage("Attendance failed. Please try again.");
+    }
+
+    delay(3000);
+    displayWelcomeMessage();
 }
 
-void saveStudentData(int id, String name, String matric) {
-  File dataFile = SD.open("students.txt", FILE_WRITE);
+bool checkIfAlreadyMarked(int id) {
+    File dataFile = SD.open("attendan.csv");
+    if (dataFile) {
+        RtcDateTime now = Rtc.GetDateTime();
+        String today = String(now.Month()) + "/" + String(now.Day()) + "/" + String(now.Year());
+
+        while (dataFile.available()) {
+            String line = dataFile.readStringUntil('\n');
+            if (line.startsWith(String(id) + ",")) {
+                int dateStart = line.indexOf(',', line.indexOf(',') + 1) + 1;
+                int dateEnd = line.indexOf(',', dateStart);
+                String date = line.substring(dateStart, dateEnd);
+
+                if (date == today) {
+                    dataFile.close();
+                    return true; // Already marked attendance today
+                }
+            }
+        }
+        dataFile.close();
+    }
+    return false; // Attendance not marked today
+}
+
+
+void saveStudentData(int id, String uuid, String matric) {
+  File dataFile = SD.open("students.csv", FILE_WRITE);
   if (dataFile) {
-    dataFile.print("ID: ");
-    dataFile.println(id);
-    dataFile.print("Name: ");
-    dataFile.println(name);
-    dataFile.print("Matric: ");
-    dataFile.println(matric);
+    // Check if the file is empty to write headers
+    if (dataFile.size() == 0) {
+      dataFile.println("ID,UUID,Matric");
+    }
+    dataFile.print(id);
+    dataFile.print(",");
+    dataFile.print(uuid);
+    dataFile.print(",");
+    dataFile.print(matric);
+    dataFile.println(); 
     dataFile.close();
     displayMessage("Data saved to SD");
   } else {
@@ -155,16 +219,48 @@ void saveStudentData(int id, String name, String matric) {
   }
 }
 
-String getStudentNameById(int id) {
-  File dataFile = SD.open("students.txt");
+void logAttendance(int id, String matric) {
+  RtcDateTime now = Rtc.GetDateTime();
+  File dataFile = SD.open("attendan.csv", FILE_WRITE);
+  if (dataFile) {
+    // Check if the file is empty to write headers
+    if (dataFile.size() == 0) {
+      dataFile.println("ID,Matric,Date,Time");
+    }
+    dataFile.print(id);
+    dataFile.print(",");
+    dataFile.print(matric);
+    dataFile.print(",");
+    dataFile.print(now.Month());
+    dataFile.print("/");
+    dataFile.print(now.Day());
+    dataFile.print("/");
+    dataFile.print(now.Year());
+    dataFile.print(",");
+    dataFile.print(now.Hour());
+    dataFile.print(":");
+    dataFile.print(now.Minute());
+    dataFile.println(); 
+    dataFile.close();
+    displayMessage("Attendance logged: " + matric);
+  } else {
+    displayMessage("Error opening file for writing");
+  }
+}
+
+
+String getStudentMatricById(int id) {
+  File dataFile = SD.open("students.csv");
   if (dataFile) {
     while (dataFile.available()) {
       String line = dataFile.readStringUntil('\n');
-      if (line.startsWith("ID: " + String(id))) {
-        line = dataFile.readStringUntil('\n');
-        line = line.substring(6); // Skip "Name: "
+      if (line.startsWith(String(id) + ",")) {
         dataFile.close();
-        return line;
+        int matricStart = line.indexOf(',', line.indexOf(',') + 1) + 1;
+        int matricEnd = line.indexOf(',', matricStart);
+        if (matricEnd == -1) matricEnd = line.length(); // Handle last column
+        String matric = line.substring(matricStart, matricEnd);
+        return matric;
       }
     }
     dataFile.close();
@@ -172,142 +268,56 @@ String getStudentNameById(int id) {
   return "";
 }
 
-void logAttendance(String name) {
-  RtcDateTime now = Rtc.GetDateTime();
-  File dataFile = SD.open("attendance.txt", FILE_WRITE);
-  if (dataFile) {
-    dataFile.print("Name: ");
-    dataFile.print(name);
-    dataFile.print(" - Date: ");
-    dataFile.print(now.Month());
-    dataFile.print("/");
-    dataFile.print(now.Day());
-    dataFile.print("/");
-    dataFile.print(now.Year());
-    dataFile.print(" - Time: ");
-    dataFile.print(now.Hour());
-    dataFile.print(":");
-    dataFile.println(now.Minute());
-    dataFile.close();
-    displayMessage("Attendance logged");
-  } else {
-    displayMessage("Error opening file for writing");
-  }
-}
 
-void displayWelcomeMessage() {
-  RtcDateTime now = Rtc.GetDateTime();
-  String date = String(now.Day()) + "/" + String(now.Month()) + "/" + String(now.Year());
-  String time = String(now.Hour()) + ":" + (now.Minute() < 10 ? "0" : "") + String(now.Minute());
-  
-  tft.fillScreen(ST77XX_BLACK);  // Clear the screen with black color
-  tft.setCursor(10, 10); // Set cursor position
-  tft.println("Welcome!");
-  tft.println("Press A to register,");
-  tft.println("Press B to mark");
-  tft.println("attendance.");
-  tft.println();
-  tft.println(date + " " + time); // Display date and time
-}
-
-void displayMessage(String message) {
-  tft.fillScreen(ST77XX_BLACK);  // Clear the screen with black color
-  tft.setCursor(10, 10); // Set cursor position
-  tft.print(message); // Print message to the display
-}
-
-String enterText(String prompt) {
-  displayMessage(prompt);
+String enterMatricNumber(String prompt) {
   String input = "";
-  char lastKey = 0;
-  unsigned long lastPressTime = 0;
-  int keyPressCount = 0;
-  const int timeout = 1000;  // 1 second timeout for keypress
+  char key;
+  displayMessage(prompt);
 
-  while (true) {
-    char key = keypad.getKey();
+  while (input.length() < 7) {
+    key = keypad.getKey();
     if (key) {
-      if (key == '#') {
-        break;
+      if (key >= '0' && key <= '9') {
+        if (input.length() == 2) input += "/";
+        input += key;
+      } else if (key == '#') {  // Use # as Enter key
+        break;  // Exit the loop when # is pressed
       } else if (key == 'D') {
-        input += ' ';
-      } else if (key == '*') {
         if (input.length() > 0) {
-          input.remove(input.length() - 1);
-        }
-      } else {
-        if (key == lastKey && millis() - lastPressTime < timeout) {
-          keyPressCount++;
-        } else {
-          keyPressCount = 1;
-        }
-        
-        lastPressTime = millis();
-        lastKey = key;
-
-        char letter = keyToLetter(key, keyPressCount);
-        if (keyPressCount == 1 || keyPressCount == 0) {
-          input += letter;
-        } else {
-          input[input.length() - 1] = letter;
+          if (input.endsWith("/")) input = input.substring(0, input.length() - 1);
+          input = input.substring(0, input.length() - 1);
         }
       }
-
-      displayMessage(prompt + "\n" + input);
+      displayMessage(prompt + "\n" + "CPE/" + input);
     }
   }
-  
   return input;
 }
 
-char keyToLetter(char key, int pressCount) {
-  switch (key) {
-    case '2':
-      if (pressCount % 4 == 1) return 'A';
-      if (pressCount % 4 == 2) return 'B';
-      if (pressCount % 4 == 3) return 'C';
-      return '2';
-    case '3':
-      if (pressCount % 4 == 1) return 'D';
-      if (pressCount % 4 == 2) return 'E';
-      if (pressCount % 4 == 3) return 'F';
-      return '3';
-    case '4':
-      if (pressCount % 4 == 1) return 'G';
-      if (pressCount % 4 == 2) return 'H';
-      if (pressCount % 4 == 3) return 'I';
-      return '4';
-    case '5':
-      if (pressCount % 4 == 1) return 'J';
-      if (pressCount % 4 == 2) return 'K';
-      if (pressCount % 4 == 3) return 'L';
-      return '5';
-    case '6':
-      if (pressCount % 4 == 1) return 'M';
-      if (pressCount % 4 == 2) return 'N';
-      if (pressCount % 4 == 3) return 'O';
-      return '6';
-    case '7':
-      if (pressCount % 5 == 1) return 'P';
-      if (pressCount % 5 == 2) return 'Q';
-      if (pressCount % 5 == 3) return 'R';
-      if (pressCount % 5 == 4) return 'S';
-      return '7';
-    case '8':
-      if (pressCount % 4 == 1) return 'T';
-      if (pressCount % 4 == 2) return 'U';
-      if (pressCount % 4 == 3) return 'V';
-      return '8';
-    case '9':
-      if (pressCount % 5 == 1) return 'W';
-      if (pressCount % 5 == 2) return 'X';
-      if (pressCount % 5 == 3) return 'Y';
-      if (pressCount % 5 == 4) return 'Z';
-      return '9';
-    case '0':
-      if (pressCount % 2 == 1) return ' ';
-      return '0';
-    default:
-      return key;
-  }
+void displayMessage(String message) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(0, 0);
+  tft.println(message);
 }
+
+void displayWelcomeMessage() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(0, 0);
+  tft.println("Student Attendance");
+  tft.println();
+  tft.println("Welcome Opeoluwa!");
+  tft.println();
+  tft.println("Press A: Register");
+  tft.println("Press B: Attendance");
+  tft.println("Press C: Home");
+}
+
+String generateUUID() {
+  String uuid = "";
+  for (int i = 0; i < 8; i++) {
+    uuid += String(random(0, 16), HEX);
+  }
+  return uuid;
+}
+
+
